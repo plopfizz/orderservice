@@ -4,6 +4,7 @@ package com.orderservice.orderservice.Services;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.orderservice.orderservice.DTO.PaymentResponse;
 import com.orderservice.orderservice.DTO.RequestOrderDTO;
 import com.orderservice.orderservice.Entities.*;
 import com.orderservice.orderservice.Repositories.OrderRepository;
@@ -45,6 +46,7 @@ public class OrderServiceImplementation implements OrderService{
         order.setQuantity(requestOrderDTO.getQuantity());
         order.setUserId(requestOrderDTO.getUserId());
         order.setStatus(OrderStatusEnum.PENDING);
+        order.setPaymentStatus(PaymentStatusEnum.PENDING);
         order.setTotalPrice(requestOrderDTO.getPrice());
         order.setOrderDate(LocalDateTime.now());
         Order createdOrder = orderRepository.save(order);
@@ -54,6 +56,7 @@ public class OrderServiceImplementation implements OrderService{
         outBoxOrder.setOrderId(createdOrder.getId());
         outBoxOrder.setQuantity(requestOrderDTO.getQuantity());
         outBoxOrder.setStockAdjustmentEnum(StockAdjustmentEnum.DECREASE);
+        outBoxOrder.setPrice(order.getTotalPrice());
         outBoxOrderRepository.save(outBoxOrder);
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode jsonNode = objectMapper.valueToTree(outBoxOrder);
@@ -65,7 +68,7 @@ public class OrderServiceImplementation implements OrderService{
     @Transactional
     public void handleInventoryReserved(JsonNode outBoxOrder) {
         // Inventory has been successfully reserved, now proceed to payment
-        System.out.println("we are here in the inventory reserved kafka event"+outBoxOrder);
+        System.out.println("we are here in the inventory reserved kafka event"+outBoxOrder +" "+LocalDateTime.now());
         kafkaTemplate.send("process_payment", outBoxOrder);
     }
 
@@ -84,28 +87,36 @@ public class OrderServiceImplementation implements OrderService{
             e.printStackTrace();
         }
     }
-    @KafkaListener(topics = "payment_success")
+    @KafkaListener(topics = "payment_status")
     @Transactional
-    public void handlePaymentSuccess(JsonNode jsonNode) throws JsonProcessingException {
+    public void handlePaymentStatus(JsonNode jsonNode) throws JsonProcessingException {
         // Mark the order as COMPLETED
         ObjectMapper objectMapper = new ObjectMapper();
-        OutBoxOrderEntity outBoxOrder = objectMapper.treeToValue(jsonNode, OutBoxOrderEntity.class);
-        Order order = orderRepository.findById(outBoxOrder.getOrderId()).orElseThrow();
-        order.setStatus(OrderStatusEnum.COMPLETE);
-        orderRepository.save(order);
+        PaymentResponse paymentResponse = objectMapper.treeToValue(jsonNode, PaymentResponse.class);
+        Order order = orderRepository.findById(paymentResponse.getOrderId()).orElseThrow();
+        PaymentStatusEnum paymentStatus = (paymentResponse.getStatus());
+        if(paymentStatus == PaymentStatusEnum.SUCCESS) {
+            order.setPaymentStatus(paymentStatus);
+            orderRepository.save(order);
+
+        }
+        else{
+            order.setStatus(OrderStatusEnum.FAILED);
+            order.setPaymentStatus(paymentStatus);
+            orderRepository.save(order);
+            OutBoxOrderEntity outBoxOrder = new OutBoxOrderEntity();
+
+            outBoxOrder.setProductId(order.getProductId());
+            outBoxOrder.setOrderId(order.getId());
+            outBoxOrder.setQuantity(order.getQuantity());
+            outBoxOrder.setStockAdjustmentEnum(StockAdjustmentEnum.INCREASE );
+            outBoxOrder.setPrice(order.getTotalPrice());
+            JsonNode node = objectMapper.valueToTree(outBoxOrder);
+            // Send event to release inventory
+            System.out.println("we are in the order failed " +" "+ LocalDateTime.now());
+            kafkaTemplate.send("release_inventory", node);
+        }
     }
-    @KafkaListener(topics = "payment_failed")
-    @Transactional
-    public void handlePaymentFailed(JsonNode jsonNode) throws JsonProcessingException {
-        // Mark the order as FAILED and release reserved inventory
-        ObjectMapper objectMapper = new ObjectMapper();
-        OutBoxOrderEntity outBoxOrder = objectMapper.treeToValue(jsonNode, OutBoxOrderEntity.class);
-        Order order = orderRepository.findById(outBoxOrder.getOrderId()).orElseThrow();
-        order.setStatus(OrderStatusEnum.FAILED);
-        orderRepository.save(order);
-        JsonNode node = objectMapper.valueToTree(outBoxOrder);
-        // Send event to release inventory
-        kafkaTemplate.send("release_inventory", node);
-    }
+
 
 }

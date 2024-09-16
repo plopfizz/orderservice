@@ -27,4 +27,5 @@ public class Order {
     private Integer quantity;
     private String productId;
     private LocalDateTime orderDate;
+    private PaymentStatusEnum paymentStatus;
 }
